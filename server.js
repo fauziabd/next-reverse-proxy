@@ -1,75 +1,62 @@
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
-const httpProxy = require('http-proxy');
-const cheerio = require('cheerio');
+const http = require('http');
 const { Transform } = require('stream');
 
 const app = express();
-const targetUrl = 'https://forem.geonode.com';
-const proxy = httpProxy.createProxyServer({});
-
-// Function to update HTML content
-const updateHtmlContent = (body, req) => {
-  const $ = cheerio.load(body);
-  $('img, script, link').each((i, elem) => {
-    const tagName = elem.name;
-    const attribute = tagName === 'link' ? 'href' : 'src';
-    const value = $(elem).attr(attribute);
-    if (value && !value.startsWith('http')) {
-      // Replace the relative path with the absolute path
-      $(elem).attr(attribute, `https://${req.headers.host}/community${value.startsWith('/') ? '' : '/'}${value}`);
-    }
-  });
-  return $.html();
-};
-
-// Function to replace the hostname in other types of content
-const replaceHostname = (chunk, req) => {
-  let data = chunk.toString();
-  data = data.replace(/forem\.geonode\.com/g, `${req.headers.host}/community`);
-  return data;
-};
+const targetHost = 'forem.geonode.com';
 
 // Middleware to modify the response
-const modifyResponse = (req, res, proxyRes, options) => {
-  let originalBody = Buffer.from([]);
-  const contentType = proxyRes.headers['content-type'];
+const modifyResponseBody = (req, res, next) => {
+  let body = [];
 
-  if (contentType && contentType.includes('text/html')) {
-    proxyRes.on('data', (data) => {
-      originalBody = Buffer.concat([originalBody, data]);
-    });
+  const _write = res.write;
+  const _end = res.end;
 
-    proxyRes.on('end', () => {
-      const updatedBody = updateHtmlContent(originalBody.toString(), req);
-      res.end(updatedBody);
-    });
+  res.write = function (chunk) {
+    body.push(chunk);
+    return _write.apply(res, arguments);
+  };
 
-    proxyRes.pipe(new Transform({
-      transform(chunk, encoding, callback) {
-        const updatedChunk = replaceHostname(chunk, req);
-        this.push(updatedChunk);
-        callback();
-      }
-    })).pipe(res);
-  } else {
-    proxyRes.pipe(new Transform({
-      transform(chunk, encoding, callback) {
-        const updatedChunk = replaceHostname(chunk, req);
-        this.push(updatedChunk);
-        callback();
-      }
-    })).pipe(res);
-  }
+  res.end = function (chunk) {
+    if (chunk) {
+      body.push(chunk);
+    }
+
+    const fullBody = Buffer.concat(body).toString('utf8');
+    const updatedBody = fullBody.replace(/\/\/forem\.geonode\.com/g, `//${req.headers.host}/community`);
+
+    _end.call(res, updatedBody);
+  };
+
+  next();
 };
 
-// Use proxy middleware
-app.use('/community', createProxyMiddleware({
-  target: targetUrl,
-  changeOrigin: true,
-  selfHandleResponse: true, // Handle response in middleware
-  onProxyRes: modifyResponse,
-}));
+// Proxy request to target
+app.use('/community', modifyResponseBody, (req, res) => {
+  const options = {
+    hostname: targetHost,
+    port: 443, // or 443 if https
+    path: req.url,
+    method: req.method,
+    headers: req.headers
+  };
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res, {
+      end: true
+    });
+  });
+
+  req.pipe(proxyReq, {
+    end: true
+  });
+
+  proxyReq.on('error', (e) => {
+    console.error(`problem with request: ${e.message}`);
+    res.status(500).send(e.message);
+  });
+});
 
 app.listen(3000, () => {
   console.log('Reverse proxy listening on port 3000');
