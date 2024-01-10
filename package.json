@@ -1,0 +1,16 @@
+{
+    "name": "reverse-proxy-server",
+    "version": "1.0.0",
+    "description": "A reverse proxy server using Express and http-proxy-middleware.",
+    "main": "server.js",
+    "scripts": {
+      "start": "node server.js"
+    },
+    "dependencies": {
+      "express": "^4.17.3",
+      "http-proxy-middleware": "^2.0.1"
+    },
+    "author": "",
+    "license": "ISC"
+  }
+  

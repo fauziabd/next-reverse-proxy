@@ -1,8 +1,0 @@
-{
-    "rewrites": [
-      {
-        "source": "/community/:match*",
-        "destination": "/api/community/:match*"
-      }
-    ]
-  }
