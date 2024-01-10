@@ -1,68 +1,76 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const httpProxy = require('http-proxy');
+const cheerio = require('cheerio');
+const { Transform } = require('stream');
+
 const app = express();
-const port = 3000; // The port your Express server will listen on
+const targetUrl = 'https://forem.geonode.com';
+const proxy = httpProxy.createProxyServer({});
 
-// Replace relative paths with absolute paths
-const rewriteHTML = (body, req) => {
-  return body.toString().replace(/(href|src)="\/(.*?)"/g, (match, p1, p2) => {
-    return `${p1}="https://${req.headers.host}/community/${p2}"`;
+// Function to update HTML content
+const updateHtmlContent = (body, req) => {
+  const $ = cheerio.load(body);
+  $('img, script, link').each((i, elem) => {
+    const tagName = elem.name;
+    const attribute = tagName === 'link' ? 'href' : 'src';
+    const value = $(elem).attr(attribute);
+    if (value && !value.startsWith('http')) {
+      // Replace the relative path with the absolute path
+      $(elem).attr(attribute, `https://${req.headers.host}/community${value.startsWith('/') ? '' : '/'}${value}`);
+    }
   });
+  return $.html();
 };
 
-// Middleware to rewrite URLs in HTML responses
-const htmlRewriteMiddleware = (req, res, next) => {
-  let _write = res.write;
-  let _end = res.end;
-  let _writeHead = res.writeHead;
-  let body = [];
+// Function to replace the hostname in other types of content
+const replaceHostname = (chunk, req) => {
+  let data = chunk.toString();
+  data = data.replace(/forem\.geonode\.com/g, `${req.headers.host}/community`);
+  return data;
+};
 
-  res.write = function (chunk) {
-    body.push(chunk);
-  };
+// Middleware to modify the response
+const modifyResponse = (req, res, proxyRes, options) => {
+  let originalBody = Buffer.from([]);
+  const contentType = proxyRes.headers['content-type'];
 
-  res.end = function (chunk) {
-    if (chunk) body.push(chunk);
+  if (contentType && contentType.includes('text/html')) {
+    proxyRes.on('data', (data) => {
+      originalBody = Buffer.concat([originalBody, data]);
+    });
 
-    if (res.get('Content-Type')?.includes('text/html')) {
-      body = Buffer.concat(body);
-      body = rewriteHTML(body, req);
-      res.setHeader('Content-Length', Buffer.byteLength(body));
-      _write.call(res, body);
-    } else {
-      for (let i = 0; i < body.length; i++) {
-        _write.call(res, body[i]);
+    proxyRes.on('end', () => {
+      const updatedBody = updateHtmlContent(originalBody.toString(), req);
+      res.end(updatedBody);
+    });
+
+    proxyRes.pipe(new Transform({
+      transform(chunk, encoding, callback) {
+        const updatedChunk = replaceHostname(chunk, req);
+        this.push(updatedChunk);
+        callback();
       }
-    }
-
-    _end.call(res);
-  };
-
-  res.writeHead = function () {
-    _writeHead.apply(res, arguments);
-  };
-
-  next();
-};
-
-// Proxy middleware options
-const proxyOptions = {
-  target: 'http://forem.geonode.com', // The target host
-  changeOrigin: true,
-  selfHandleResponse: true, // Handle response manually
-  onProxyRes: (proxyRes, req, res) => {
-    // Modify the response headers
-    if (proxyRes.headers['content-type']?.includes('text/html')) {
-      delete proxyRes.headers['content-length'];
-      res.removeHeader('Content-Length');
-    }
+    })).pipe(res);
+  } else {
+    proxyRes.pipe(new Transform({
+      transform(chunk, encoding, callback) {
+        const updatedChunk = replaceHostname(chunk, req);
+        this.push(updatedChunk);
+        callback();
+      }
+    })).pipe(res);
   }
 };
 
-// Use the htmlRewriteMiddleware for HTML responses
-app.use('/community', htmlRewriteMiddleware, createProxyMiddleware(proxyOptions));
+// Use proxy middleware
+app.use('/community', createProxyMiddleware({
+  target: targetUrl,
+  changeOrigin: true,
+  selfHandleResponse: true, // Handle response in middleware
+  onProxyRes: modifyResponse,
+}));
 
-// Start the Express server
-app.listen(port, () => {
-  console.log(`Reverse proxy server running on port ${port}`);
+app.listen(3000, () => {
+  console.log('Reverse proxy listening on port 3000');
 });
